@@ -11,6 +11,14 @@ import {
   unregisterItemContextMenu,
   unregisterShortcuts,
 } from "./modules/markdown";
+import {
+  closeAllWhiteboards,
+  closeWhiteboardsForWindow,
+  injectWhiteboardStyles,
+  registerWhiteboardMenus,
+  registerWhiteboardTabHooks,
+  unregisterWhiteboardMenus,
+} from "./modules/whiteboard";
 import { ensureDOMGlobals } from "./utils/dom";
 import { getString, initLocale } from "./utils/locale";
 
@@ -50,8 +58,11 @@ async function onMainWindowLoad(win: _ZoteroTypes.MainWindow): Promise<void> {
   registerShortcuts();
 
   registerMarkdownTabHooks(win);
+  registerWhiteboardTabHooks(win);
   registerItemContextMenu(win);
+  registerWhiteboardMenus(win);
   injectMarkdownStyles(win);
+  injectWhiteboardStyles(win);
 
   const popupWin = new ztoolkit.ProgressWindow(addon.data.config.addonName, {
     closeOnClick: true,
@@ -73,10 +84,13 @@ async function onMainWindowUnload(_win: Window): Promise<void> {
   // Per-window cleanup is handled by the toolkit's own Services.wm
   // onCloseWindow callbacks (unInitKeyboardListener for the closing window).
   unregisterItemContextMenu(_win);
+  unregisterWhiteboardMenus(_win);
+  void closeWhiteboardsForWindow(_win);
 }
 
 async function onShutdown(): Promise<void> {
   await flushAllSessions();
+  await closeAllWhiteboards();
   unregisterFileOpenInterceptor();
   unregisterMenus();
   unregisterShortcuts();

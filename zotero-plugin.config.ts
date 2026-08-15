@@ -44,6 +44,15 @@ export default defineConfig({
         target: "firefox115",
         outfile: `.scaffold/build/addon/content/editor/editor.js`,
       },
+      {
+        entryPoints: ["src/whiteboard/bootstrap.tsx"],
+        bundle: true,
+        minify: true,
+        target: "firefox115",
+        jsx: "automatic",
+        loader: { ".css": "css", ".woff2": "dataurl", ".woff": "dataurl" },
+        outfile: `.scaffold/build/addon/content/whiteboard/whiteboard.js`,
+      },
     ],
   },
 
