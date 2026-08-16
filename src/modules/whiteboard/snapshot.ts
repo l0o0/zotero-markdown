@@ -48,6 +48,9 @@ export interface BoardEdge {
   target: string;
   sourceHandle?: string | null;
   targetHandle?: string | null;
+  label?: string;
+  dashed?: boolean;
+  color?: string;
 }
 
 export interface BoardViewport {
@@ -136,6 +139,9 @@ function parseEdge(value: unknown): BoardEdge | null {
       typeof edge.sourceHandle === "string" ? edge.sourceHandle : null,
     targetHandle:
       typeof edge.targetHandle === "string" ? edge.targetHandle : null,
+    label: typeof edge.label === "string" ? edge.label : undefined,
+    dashed: typeof edge.dashed === "boolean" ? edge.dashed : undefined,
+    color: typeof edge.color === "string" ? edge.color : undefined,
   };
 }
 

@@ -28,6 +28,7 @@ export interface WhiteboardHandle {
   command: (command: "undo" | "redo") => void;
   resolvePick: (requestId: string, nodeId: string, data: BoardNodeData) => void;
   rejectPick: (requestId: string, message: string) => void;
+  setSaveState: (state: "saved" | "saving" | "error") => void;
 }
 
 function whiteboardPageURL() {
@@ -46,7 +47,8 @@ type PendingCommand = Extract<
       | "focus"
       | "destroy"
       | "itemPicked"
-      | "pickFailed";
+      | "pickFailed"
+      | "saveState";
   }
 >;
 
@@ -63,8 +65,26 @@ export function createWhiteboardEditor(
     onPickItem?: (
       requestId: string,
       nodeId: string,
-      kind: "item" | "pdf",
+      kind: "item" | "pdf" | "note" | "attachment",
     ) => void;
+    onOpenItem?: (payload: {
+      itemID?: number;
+      attachmentID?: number;
+      noteID?: number;
+      pdfPage?: number;
+    }) => void;
+    onDropItems?: (
+      requestId: string,
+      nodeId: string,
+      raw: Record<string, string>,
+    ) => void;
+    onExportFile?: (payload: {
+      requestId: string;
+      format: "png" | "svg" | "md";
+      mimeType: string;
+      dataUrl?: string;
+      text?: string;
+    }) => void;
   } = {},
 ): WhiteboardHandle {
   const ownerWin =
@@ -188,6 +208,19 @@ export function createWhiteboardEditor(
           data.payload.kind,
         );
         break;
+      case "openItem":
+        options.onOpenItem?.(data.payload);
+        break;
+      case "dropItems":
+        options.onDropItems?.(
+          data.payload.requestId,
+          data.payload.nodeId,
+          data.payload.raw,
+        );
+        break;
+      case "exportFile":
+        options.onExportFile?.(data.payload);
+        break;
       case "error":
         options.onError?.(data.payload.message);
         break;
@@ -270,6 +303,13 @@ export function createWhiteboardEditor(
         source: WHITEBOARD_MESSAGE_SOURCE,
         type: "pickFailed",
         payload: { requestId, message },
+      });
+    },
+    setSaveState(state) {
+      sendOrQueue({
+        source: WHITEBOARD_MESSAGE_SOURCE,
+        type: "saveState",
+        payload: { state },
       });
     },
   };

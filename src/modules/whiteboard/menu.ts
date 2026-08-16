@@ -1,7 +1,10 @@
 import { getString } from "../../utils/locale";
-import { createWhiteboardAttachment } from "./create";
+import {
+  createWhiteboardAttachment,
+  createWhiteboardFromCollection,
+} from "./create";
 import { isWhiteboardAttachment } from "./detect";
-import { openWhiteboardAttachment } from "./open";
+import { openWhiteboardAttachment, recentWhiteboardIDs } from "./open";
 
 const itemCleanups = new Map<Window, () => void>();
 
@@ -35,6 +38,61 @@ export function registerWhiteboardMenus(win: _ZoteroTypes.MainWindow) {
     });
     tools.appendChild(item);
     cleanups.push(() => item.remove());
+
+    const fromCollection = doc.createXULElement("menuitem") as HTMLElement;
+    fromCollection.id = `${addon.data.config.addonRef}-tools-whiteboard-collection`;
+    fromCollection.setAttribute(
+      "label",
+      getString("menuitem-new-whiteboard-from-collection"),
+    );
+    fromCollection.setAttribute("class", "menuitem-iconic");
+    fromCollection.style.listStyleImage = `url(${icon()})`;
+    fromCollection.addEventListener("command", () => {
+      void createWhiteboardFromCollection();
+    });
+    tools.appendChild(fromCollection);
+    cleanups.push(() => fromCollection.remove());
+
+    const recentMenu = doc.createXULElement("menu") as HTMLElement;
+    recentMenu.id = `${addon.data.config.addonRef}-tools-whiteboard-recent`;
+    recentMenu.setAttribute("label", getString("menuitem-recent-whiteboards"));
+    recentMenu.setAttribute("class", "menuitem-iconic");
+    recentMenu.style.listStyleImage = `url(${icon()})`;
+    const recentPopup = doc.createXULElement("menupopup") as HTMLElement;
+    recentMenu.appendChild(recentPopup);
+    const refreshRecent = () => {
+      while (recentPopup.firstChild) {
+        (recentPopup.firstChild as HTMLElement).remove();
+      }
+      const ids = recentWhiteboardIDs();
+      for (const id of ids) {
+        const item = Zotero.Items.get(id);
+        if (!item || !isWhiteboardAttachment(item)) continue;
+        const recentItem = doc.createXULElement("menuitem") as HTMLElement;
+        recentItem.setAttribute(
+          "label",
+          item.attachmentFilename || item.getField("title") || "Whiteboard",
+        );
+        recentItem.setAttribute("class", "menuitem-iconic");
+        recentItem.style.listStyleImage = `url(${icon()})`;
+        recentItem.addEventListener("command", () => {
+          void openWhiteboardAttachment(item);
+        });
+        recentPopup.appendChild(recentItem);
+      }
+      if (!recentPopup.firstChild) {
+        const empty = doc.createXULElement("menuitem") as HTMLElement;
+        empty.setAttribute(
+          "label",
+          getString("menuitem-recent-whiteboards-empty"),
+        );
+        empty.setAttribute("disabled", "true");
+        recentPopup.appendChild(empty);
+      }
+    };
+    recentPopup.addEventListener("popupshowing", refreshRecent);
+    tools.appendChild(recentMenu);
+    cleanups.push(() => recentMenu.remove());
   } else {
     ztoolkit.log("Tools popup missing; whiteboard tools menu not registered");
   }

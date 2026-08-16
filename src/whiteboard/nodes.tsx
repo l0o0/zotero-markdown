@@ -32,6 +32,8 @@ function CardShell(props: {
     >
       <Handle type="target" position={Position.Left} />
       <Handle type="source" position={Position.Right} />
+      <Handle type="target" position={Position.Top} />
+      <Handle type="source" position={Position.Bottom} />
       <span className="zmd-board-card-kind">{LABELS[props.kind]}</span>
       {props.children}
     </article>

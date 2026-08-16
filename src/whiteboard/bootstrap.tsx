@@ -24,7 +24,16 @@ let runtime: WhiteboardRuntime | null = null;
 let rev = 0;
 
 function postToParent(message: {
-  type: "ready" | "change" | "snapshot" | "save" | "error" | "pickItem";
+  type:
+    | "ready"
+    | "change"
+    | "snapshot"
+    | "save"
+    | "error"
+    | "pickItem"
+    | "openItem"
+    | "dropItems"
+    | "exportFile";
   payload?: unknown;
 }) {
   window.parent?.postMessage(
@@ -86,6 +95,9 @@ function handleParentMessage(data: ParentToWhiteboardMessage) {
       break;
     case "pickFailed":
       runtime?.rejectPick(data.payload.requestId, data.payload.message);
+      break;
+    case "saveState":
+      runtime?.setSaveState(data.payload.state);
       break;
     case "focus":
       window.focus();
@@ -168,6 +180,14 @@ function boot() {
           payload: { requestId, nodeId, kind },
         })
       }
+      onOpenItem={(payload) => postToParent({ type: "openItem", payload })}
+      onDropItems={(requestId, nodeId, raw) =>
+        postToParent({
+          type: "dropItems",
+          payload: { requestId, nodeId, raw },
+        })
+      }
+      onExportFile={(payload) => postToParent({ type: "exportFile", payload })}
     />,
   );
   postToParent({ type: "ready" });

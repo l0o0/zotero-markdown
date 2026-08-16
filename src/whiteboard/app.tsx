@@ -6,15 +6,16 @@ import {
   useMemo,
   useRef,
   useState,
+  type DragEvent,
   type ReactElement,
 } from "react";
 import {
   Background,
   BackgroundVariant,
-  Controls,
-  MiniMap,
-  MarkerType,
   ConnectionMode,
+  Controls,
+  MarkerType,
+  MiniMap,
   ReactFlow,
   addEdge,
   applyEdgeChanges,
@@ -42,18 +43,40 @@ import {
 } from "../modules/whiteboard/snapshot";
 import { boardNodeTypes, type AcademicNode } from "./nodes";
 import {
+  alignNodes,
+  autoLayoutNodes,
+  distributeNodes,
+  type AlignMode,
+} from "./layout";
+import { buildBoardMarkdown, buildBoardSvg, svgToPngDataUrl } from "./export";
+import {
+  IconAlignBottom,
+  IconAlignHCenter,
+  IconAlignLeft,
+  IconAlignRight,
+  IconAlignTop,
+  IconAlignVCenter,
   IconArrow,
+  IconCopy,
+  IconDistributeH,
+  IconDistributeV,
+  IconEdit,
   IconEllipse,
   IconEraser,
+  IconExport,
   IconFile,
+  IconFitView,
   IconItem,
+  IconLayout,
   IconLine,
   IconNote,
+  IconOpen,
   IconPdf,
   IconRect,
   IconRedo,
   IconSave,
   IconText,
+  IconTrash,
   IconUndo,
 } from "./icons";
 
@@ -71,6 +94,29 @@ const DEFAULT_LABELS: WhiteboardLabels = {
   undo: "Undo",
   redo: "Redo",
   save: "Save",
+  editText: "Edit text",
+  copy: "Copy",
+  delete: "Delete",
+  openItem: "Open item",
+  alignLeft: "Align left",
+  alignRight: "Align right",
+  alignTop: "Align top",
+  alignBottom: "Align bottom",
+  alignHorizontal: "Align horizontal center",
+  alignVertical: "Align vertical center",
+  distributeHorizontal: "Distribute horizontally",
+  distributeVertical: "Distribute vertically",
+  fitView: "Fit view",
+  autoLayout: "Auto layout",
+  edgeColor: "Edge color",
+  edgeDash: "Toggle dashed",
+  edgeArrow: "Toggle arrow",
+  saved: "Saved",
+  saving: "Saving…",
+  saveFailed: "Save failed",
+  exportPng: "Export PNG",
+  exportSvg: "Export SVG",
+  exportMarkdown: "Export Markdown",
 };
 
 export interface WhiteboardAppProps {
@@ -81,7 +127,29 @@ export interface WhiteboardAppProps {
   onChange: (rev: number) => void;
   onError: (message: string) => void;
   onSave: () => void;
-  onPickItem: (requestId: string, nodeId: string, kind: "item" | "pdf") => void;
+  onPickItem: (
+    requestId: string,
+    nodeId: string,
+    kind: "item" | "pdf" | "note" | "attachment",
+  ) => void;
+  onOpenItem: (payload: {
+    itemID?: number;
+    attachmentID?: number;
+    noteID?: number;
+    pdfPage?: number;
+  }) => void;
+  onDropItems: (
+    requestId: string,
+    nodeId: string,
+    raw: Record<string, string>,
+  ) => void;
+  onExportFile: (payload: {
+    requestId: string;
+    format: "png" | "svg" | "md";
+    mimeType: string;
+    dataUrl?: string;
+    text?: string;
+  }) => void;
 }
 
 export interface WhiteboardRuntime {
@@ -93,6 +161,7 @@ export interface WhiteboardRuntime {
   redo: () => void;
   resolvePick: (requestId: string, nodeId: string, data: BoardNodeData) => void;
   rejectPick: (requestId: string, message: string) => void;
+  setSaveState: (state: "saved" | "saving" | "error") => void;
 }
 
 function newId(kind: string) {
@@ -115,6 +184,19 @@ function toFlow(doc: BoardDocument): { nodes: AcademicNode[]; edges: Edge[] } {
       target: edge.target,
       sourceHandle: edge.sourceHandle ?? undefined,
       targetHandle: edge.targetHandle ?? undefined,
+      label: edge.label,
+      style: {
+        stroke: edge.color ?? "#9ca3af",
+        strokeDasharray: edge.dashed ? "6 4" : undefined,
+      },
+      markerEnd: edge.color
+        ? {
+            type: MarkerType.ArrowClosed,
+            width: 16,
+            height: 16,
+            color: edge.color,
+          }
+        : { type: MarkerType.ArrowClosed, width: 16, height: 16 },
     })),
   };
 }
@@ -142,8 +224,18 @@ function fromFlow(
       target: edge.target,
       sourceHandle: edge.sourceHandle ?? null,
       targetHandle: edge.targetHandle ?? null,
+      label: typeof edge.label === "string" ? edge.label : undefined,
+      dashed: edge.style?.strokeDasharray ? true : undefined,
+      color:
+        typeof edge.style?.stroke === "string" ? edge.style.stroke : undefined,
     })),
   };
+}
+
+interface ContextMenuState {
+  x: number;
+  y: number;
+  nodeId: string;
 }
 
 export function WhiteboardApp(props: WhiteboardAppProps): ReactElement {
@@ -159,6 +251,15 @@ export function WhiteboardApp(props: WhiteboardAppProps): ReactElement {
     props.labels ?? DEFAULT_LABELS,
   );
   const [eraser, setEraser] = useState(false);
+  const [saveState, setSaveState] = useState<"saved" | "saving" | "error">(
+    "saved",
+  );
+  const [editing, setEditing] = useState<{
+    nodeId: string;
+    value: string;
+  } | null>(null);
+  const [menu, setMenu] = useState<ContextMenuState | null>(null);
+
   const viewportRef = useRef<Viewport>(
     initial.viewport ?? { x: 0, y: 0, zoom: 1 },
   );
@@ -250,7 +351,12 @@ export function WhiteboardApp(props: WhiteboardAppProps): ReactElement {
         }).nodes[0],
       ]);
       bump();
-      if (kind === "item" || kind === "pdf") {
+      if (
+        kind === "item" ||
+        kind === "pdf" ||
+        kind === "note" ||
+        kind === "attachment"
+      ) {
         const requestId = `pick-${nodeId}-${Date.now().toString(36)}`;
         pendingPicksRef.current.set(requestId, nodeId);
         propsRef.current.onPickItem(requestId, nodeId, kind);
@@ -279,6 +385,352 @@ export function WhiteboardApp(props: WhiteboardAppProps): ReactElement {
     },
     [bump, pushHistory],
   );
+
+  const updateNode = useCallback(
+    (nodeId: string, updater: (node: AcademicNode) => AcademicNode) => {
+      pushHistory();
+      setNodes((current) =>
+        current.map((node) => (node.id === nodeId ? updater(node) : node)),
+      );
+      bump();
+    },
+    [bump, pushHistory],
+  );
+
+  const startEdit = useCallback((nodeId: string) => {
+    const node = nodesRef.current.find((item) => item.id === nodeId);
+    if (!node) return;
+    setMenu(null);
+    setEraser(false);
+    setEditing({ nodeId, value: node.data.title || "" });
+  }, []);
+
+  const openNode = useCallback(
+    (node: AcademicNode) => {
+      const data = node.data;
+      if (data.noteID) {
+        propsRef.current.onOpenItem({ noteID: data.noteID });
+      } else if (data.attachmentID && node.type === "pdf") {
+        propsRef.current.onOpenItem({
+          attachmentID: data.attachmentID,
+          pdfPage: data.pdfPage,
+        });
+      } else if (data.attachmentID) {
+        propsRef.current.onOpenItem({ attachmentID: data.attachmentID });
+      } else if (data.itemID) {
+        propsRef.current.onOpenItem({ itemID: data.itemID });
+      } else {
+        startEdit(node.id);
+      }
+    },
+    [startEdit],
+  );
+
+  const commitEdit = useCallback(() => {
+    if (!editing) return;
+    const { nodeId, value } = editing;
+    setEditing(null);
+    const node = nodesRef.current.find((item) => item.id === nodeId);
+    if (!node) return;
+    if (node.data.title === value) return;
+    updateNode(nodeId, (current) => ({
+      ...current,
+      data: { ...current.data, title: value },
+    }));
+  }, [editing, updateNode]);
+
+  const cancelEdit = useCallback(() => setEditing(null), []);
+
+  const copyNode = useCallback(
+    (nodeId: string) => {
+      const node = nodesRef.current.find((item) => item.id === nodeId);
+      if (!node) return;
+      pushHistory();
+      const id = newId(node.type || "item");
+      setNodes((current) => [
+        ...current,
+        {
+          ...node,
+          id,
+          selected: false,
+          position: { x: node.position.x + 24, y: node.position.y + 24 },
+        },
+      ]);
+      bump();
+    },
+    [bump, pushHistory],
+  );
+
+  const deleteNode = useCallback(
+    (nodeId: string) => {
+      setMenu(null);
+      eraseNode(nodeId);
+    },
+    [eraseNode],
+  );
+
+  const alignSelected = useCallback(
+    (mode: AlignMode) => {
+      const selected = nodesRef.current.filter((node) => node.selected);
+      if (selected.length < 2) return;
+      pushHistory();
+      const aligned = alignNodes(selected, mode);
+      setNodes((current) =>
+        current.map((node) => {
+          const target = aligned.find((item) => item.id === node.id);
+          return target ? { ...node, position: target.position } : node;
+        }),
+      );
+      bump();
+    },
+    [bump, pushHistory],
+  );
+
+  const distributeSelected = useCallback(
+    (direction: "horizontal" | "vertical") => {
+      const selected = nodesRef.current.filter((node) => node.selected);
+      if (selected.length < 3) return;
+      pushHistory();
+      const distributed = distributeNodes(selected, direction);
+      setNodes((current) =>
+        current.map((node) => {
+          const target = distributed.find((item) => item.id === node.id);
+          return target ? { ...node, position: target.position } : node;
+        }),
+      );
+      bump();
+    },
+    [bump, pushHistory],
+  );
+
+  const autoLayout = useCallback(() => {
+    pushHistory();
+    setNodes((current) => autoLayoutNodes(current));
+    bump();
+  }, [bump, pushHistory]);
+
+  const fitView = useCallback(() => {
+    void flowRef.current?.fitView({ padding: 0.2, duration: 300 });
+  }, []);
+
+  const EDGE_COLORS = ["#9ca3af", "#2563eb", "#059669", "#d97706", "#dc2626"];
+
+  const cycleEdgeColor = useCallback(
+    (edgeId: string) => {
+      const edge = edgesRef.current.find((item) => item.id === edgeId);
+      if (!edge) return;
+      const current = edge.style?.stroke ?? "#9ca3af";
+      const next =
+        EDGE_COLORS[
+          (EDGE_COLORS.indexOf(String(current)) + 1) % EDGE_COLORS.length
+        ];
+      pushHistory();
+      setEdges((currentEdges) =>
+        currentEdges.map((item) =>
+          item.id === edgeId
+            ? {
+                ...item,
+                style: {
+                  ...(item.style ?? {}),
+                  stroke: next,
+                },
+                markerEnd: {
+                  type: MarkerType.ArrowClosed,
+                  width: 16,
+                  height: 16,
+                  color: next,
+                },
+              }
+            : item,
+        ),
+      );
+      bump();
+    },
+    [bump, pushHistory],
+  );
+
+  const toggleEdgeDashed = useCallback(
+    (edgeId: string) => {
+      const edge = edgesRef.current.find((item) => item.id === edgeId);
+      if (!edge) return;
+      const dashed = !edge.style?.strokeDasharray;
+      pushHistory();
+      setEdges((currentEdges) =>
+        currentEdges.map((item) =>
+          item.id === edgeId
+            ? {
+                ...item,
+                style: {
+                  ...(item.style ?? {}),
+                  strokeDasharray: dashed ? "6 4" : undefined,
+                },
+              }
+            : item,
+        ),
+      );
+      bump();
+    },
+    [bump, pushHistory],
+  );
+
+  const toggleEdgeArrow = useCallback(
+    (edgeId: string) => {
+      const edge = edgesRef.current.find((item) => item.id === edgeId);
+      if (!edge) return;
+      const hasArrow = !!edge.markerEnd;
+      pushHistory();
+      setEdges((currentEdges) =>
+        currentEdges.map((item) =>
+          item.id === edgeId
+            ? {
+                ...item,
+                markerEnd: hasArrow
+                  ? undefined
+                  : {
+                      type: MarkerType.ArrowClosed,
+                      width: 16,
+                      height: 16,
+                      color: String(item.style?.stroke ?? "#9ca3af"),
+                    },
+              }
+            : item,
+        ),
+      );
+      bump();
+    },
+    [bump, pushHistory],
+  );
+
+  const exportAs = useCallback(
+    (format: "png" | "svg" | "md") => {
+      setMenu(null);
+      const doc = snapshotNow();
+      const requestId = `export-${Date.now().toString(36)}`;
+      if (format === "md") {
+        propsRef.current.onExportFile({
+          requestId,
+          format,
+          mimeType: "text/markdown",
+          text: buildBoardMarkdown(doc),
+        });
+        return;
+      }
+      const svg = buildBoardSvg(doc);
+      if (format === "svg") {
+        propsRef.current.onExportFile({
+          requestId,
+          format,
+          mimeType: "image/svg+xml",
+          dataUrl: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`,
+        });
+        return;
+      }
+      void svgToPngDataUrl(svg).then((dataUrl) => {
+        propsRef.current.onExportFile({
+          requestId,
+          format,
+          mimeType: "image/png",
+          dataUrl,
+        });
+      });
+    },
+    [snapshotNow],
+  );
+
+  const handleDrop = useCallback(
+    (event: DragEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      setEraser(false);
+      const position = flowRef.current?.screenToFlowPosition({
+        x: event.clientX,
+        y: event.clientY,
+      }) ?? { x: 120, y: 120 };
+      const nodeId = newId("item");
+      pushHistory();
+      setNodes((current) => [
+        ...current,
+        toFlow({
+          v: 1,
+          engine: "xyflow",
+          nodes: [createBoardNode("item", position, nodeId)],
+          edges: [],
+        }).nodes[0],
+      ]);
+      bump();
+      const raw: Record<string, string> = {};
+      const types = Array.from(event.dataTransfer?.types || []);
+      for (const type of types) {
+        try {
+          raw[type] = event.dataTransfer.getData(type);
+        } catch {
+          // ignore
+        }
+      }
+      const requestId = `drop-${nodeId}-${Date.now().toString(36)}`;
+      pendingPicksRef.current.set(requestId, nodeId);
+      propsRef.current.onDropItems(requestId, nodeId, raw);
+    },
+    [bump, pushHistory],
+  );
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (editing) return;
+      if (event.key === "Escape") {
+        setMenu(null);
+        setEraser(false);
+        setEditing(null);
+        return;
+      }
+      if (event.key.startsWith("Arrow")) {
+        const selected = nodesRef.current.filter((node) => node.selected);
+        if (!selected.length) return;
+        event.preventDefault();
+        const step = event.shiftKey ? 16 : 1;
+        const dx =
+          event.key === "ArrowLeft"
+            ? -step
+            : event.key === "ArrowRight"
+              ? step
+              : 0;
+        const dy =
+          event.key === "ArrowUp"
+            ? -step
+            : event.key === "ArrowDown"
+              ? step
+              : 0;
+        if (!dx && !dy) return;
+        pushHistory();
+        setNodes((current) =>
+          current.map((node) =>
+            node.selected
+              ? {
+                  ...node,
+                  position: {
+                    x: node.position.x + dx,
+                    y: node.position.y + dy,
+                  },
+                }
+              : node,
+          ),
+        );
+        bump();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [editing, bump, pushHistory]);
+
+  useEffect(() => {
+    if (!menu) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!(event.target as HTMLElement).closest(".zmd-board-context-menu")) {
+        setMenu(null);
+      }
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => window.removeEventListener("pointerdown", onPointerDown);
+  }, [menu]);
 
   useEffect(() => {
     const runtime: WhiteboardRuntime = {
@@ -309,7 +761,7 @@ export function WhiteboardApp(props: WhiteboardAppProps): ReactElement {
         pushHistory();
         setNodes((current) =>
           current.map((node) =>
-            node.id === nodeId ? { ...node, data } : node,
+            node.id === nodeId ? { ...node, type: data.kind, data } : node,
           ),
         );
         bump();
@@ -318,20 +770,36 @@ export function WhiteboardApp(props: WhiteboardAppProps): ReactElement {
         if (!pendingPicksRef.current.delete(requestId)) return;
         propsRef.current.onError(message);
       },
+      setSaveState(state) {
+        setSaveState(state);
+      },
     };
     runtimeRef.current = runtime;
     propsRef.current.onReady(runtime);
   }, [applyDocument, bump, pushHistory, snapshotNow]);
-  // onReady once: getSnapshot/undo read refs, so they stay current.
 
   useEffect(() => {
     setTheme(props.theme);
   }, [props.theme]);
 
+  const selectedNodes = nodes.filter((node) => node.selected);
+  const selectedEdges = edges.filter((edge) => edge.selected);
+  const editingNode = editing
+    ? nodes.find((node) => node.id === editing.nodeId)
+    : null;
+  const editingScreen = editingNode
+    ? flowRef.current?.flowToScreenPosition(editingNode.position)
+    : null;
+  const menuNode = menu ? nodes.find((node) => node.id === menu.nodeId) : null;
+
   return (
     <div
       className={`zmd-board-host${eraser ? " is-eraser" : ""}`}
       data-theme={theme}
+      onDragOver={(event) => {
+        if (event.dataTransfer?.types?.length) event.preventDefault();
+      }}
+      onDrop={handleDrop}
     >
       <div className="zmd-board-toolbar">
         <button
@@ -429,6 +897,111 @@ export function WhiteboardApp(props: WhiteboardAppProps): ReactElement {
         >
           <IconSave />
         </button>
+        {selectedNodes.length >= 2 ? (
+          <>
+            <span className="zmd-board-toolbar-sep" />
+            <button
+              type="button"
+              title={labels.alignLeft}
+              onClick={() => alignSelected("left")}
+            >
+              <IconAlignLeft />
+            </button>
+            <button
+              type="button"
+              title={labels.alignRight}
+              onClick={() => alignSelected("right")}
+            >
+              <IconAlignRight />
+            </button>
+            <button
+              type="button"
+              title={labels.alignTop}
+              onClick={() => alignSelected("top")}
+            >
+              <IconAlignTop />
+            </button>
+            <button
+              type="button"
+              title={labels.alignBottom}
+              onClick={() => alignSelected("bottom")}
+            >
+              <IconAlignBottom />
+            </button>
+            <button
+              type="button"
+              title={labels.alignHorizontal}
+              onClick={() => alignSelected("horizontal")}
+            >
+              <IconAlignHCenter />
+            </button>
+            <button
+              type="button"
+              title={labels.alignVertical}
+              onClick={() => alignSelected("vertical")}
+            >
+              <IconAlignVCenter />
+            </button>
+            {selectedNodes.length >= 3 ? (
+              <>
+                <button
+                  type="button"
+                  title={labels.distributeHorizontal}
+                  onClick={() => distributeSelected("horizontal")}
+                >
+                  <IconDistributeH />
+                </button>
+                <button
+                  type="button"
+                  title={labels.distributeVertical}
+                  onClick={() => distributeSelected("vertical")}
+                >
+                  <IconDistributeV />
+                </button>
+              </>
+            ) : null}
+          </>
+        ) : null}
+        {selectedEdges.length >= 1 ? (
+          <>
+            <span className="zmd-board-toolbar-sep" />
+            <button
+              type="button"
+              title={labels.edgeColor}
+              onClick={() => cycleEdgeColor(selectedEdges[0].id)}
+            >
+              <IconLine />
+            </button>
+            <button
+              type="button"
+              title={labels.edgeDash}
+              onClick={() => toggleEdgeDashed(selectedEdges[0].id)}
+            >
+              <IconLine />
+            </button>
+            <button
+              type="button"
+              title={labels.edgeArrow}
+              onClick={() => toggleEdgeArrow(selectedEdges[0].id)}
+            >
+              <IconArrow />
+            </button>
+          </>
+        ) : null}
+        <span className="zmd-board-toolbar-sep" />
+        <button type="button" title={labels.fitView} onClick={fitView}>
+          <IconFitView />
+        </button>
+        <button type="button" title={labels.autoLayout} onClick={autoLayout}>
+          <IconLayout />
+        </button>
+        <span className={`zmd-board-save-state is-${saveState}`}>
+          {saveState === "saving"
+            ? labels.saving
+            : saveState === "error"
+              ? labels.saveFailed
+              : labels.saved}
+        </span>
       </div>
       <ReactFlow<AcademicNode>
         nodes={nodes}
@@ -443,27 +1016,40 @@ export function WhiteboardApp(props: WhiteboardAppProps): ReactElement {
         }}
         snapToGrid
         snapGrid={[16, 16]}
-        deleteKeyCode={["Backspace", "Delete"]}
+        deleteKeyCode={editing ? null : ["Backspace", "Delete"]}
         onInit={(instance) => {
           flowRef.current = instance;
         }}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
-        nodesDraggable={!eraser}
+        nodesDraggable={!eraser && !editing}
         nodesConnectable={!eraser}
         onNodeClick={(event, node) => {
           if (!eraser) return;
           event.preventDefault();
           eraseNode(node.id);
         }}
+        onNodeDoubleClick={(event, node) => {
+          event.preventDefault();
+          openNode(node);
+        }}
         onEdgeClick={(event, edge) => {
           if (!eraser) return;
           event.preventDefault();
           eraseEdge(edge.id);
         }}
+        onNodeContextMenu={(event, node) => {
+          event.preventDefault();
+          setMenu({ x: event.clientX, y: event.clientY, nodeId: node.id });
+        }}
         onPaneClick={() => {
           if (eraser) setEraser(false);
+          setMenu(null);
+        }}
+        onPaneContextMenu={(event) => {
+          event.preventDefault();
+          setMenu({ x: event.clientX, y: event.clientY, nodeId: "" });
         }}
         onNodeDragStart={pushHistory}
         onMoveEnd={(_, viewport) => {
@@ -484,6 +1070,99 @@ export function WhiteboardApp(props: WhiteboardAppProps): ReactElement {
         <Controls showInteractive={false} />
         <MiniMap pannable zoomable />
       </ReactFlow>
+      {editing && editingNode && editingScreen ? (
+        <div
+          className="zmd-board-editor"
+          style={{
+            left: editingScreen.x,
+            top: editingScreen.y,
+            width: Math.max(editingNode.width ?? 200, 160),
+          }}
+        >
+          <textarea
+            autoFocus
+            value={editing.value}
+            rows={2}
+            onChange={(event) =>
+              setEditing({ nodeId: editing.nodeId, value: event.target.value })
+            }
+            onBlur={commitEdit}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                commitEdit();
+              } else if (event.key === "Escape") {
+                event.preventDefault();
+                cancelEdit();
+              }
+            }}
+          />
+        </div>
+      ) : null}
+      {menu ? (
+        <div
+          className="zmd-board-context-menu"
+          style={{ left: menu.x, top: menu.y }}
+        >
+          {menuNode ? (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  setMenu(null);
+                  startEdit(menuNode.id);
+                }}
+              >
+                <IconEdit />
+                <span>{labels.editText}</span>
+              </button>
+              {(menuNode.data.itemID ||
+                menuNode.data.attachmentID ||
+                menuNode.data.noteID) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenu(null);
+                    openNode(menuNode);
+                  }}
+                >
+                  <IconOpen />
+                  <span>{labels.openItem}</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  setMenu(null);
+                  copyNode(menuNode.id);
+                }}
+              >
+                <IconCopy />
+                <span>{labels.copy}</span>
+              </button>
+              <button type="button" onClick={() => deleteNode(menuNode.id)}>
+                <IconTrash />
+                <span>{labels.delete}</span>
+              </button>
+            </>
+          ) : (
+            <>
+              <button type="button" onClick={() => exportAs("png")}>
+                <IconExport />
+                <span>{labels.exportPng}</span>
+              </button>
+              <button type="button" onClick={() => exportAs("svg")}>
+                <IconExport />
+                <span>{labels.exportSvg}</span>
+              </button>
+              <button type="button" onClick={() => exportAs("md")}>
+                <IconExport />
+                <span>{labels.exportMarkdown}</span>
+              </button>
+            </>
+          )}
+        </div>
+      ) : null}
     </div>
   );
 }

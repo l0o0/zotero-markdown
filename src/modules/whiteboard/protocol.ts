@@ -38,6 +38,29 @@ export interface WhiteboardLabels {
   undo: string;
   redo: string;
   save: string;
+  editText: string;
+  copy: string;
+  delete: string;
+  openItem: string;
+  alignLeft: string;
+  alignRight: string;
+  alignTop: string;
+  alignBottom: string;
+  alignHorizontal: string;
+  alignVertical: string;
+  distributeHorizontal: string;
+  distributeVertical: string;
+  fitView: string;
+  autoLayout: string;
+  edgeColor: string;
+  edgeDash: string;
+  edgeArrow: string;
+  saved: string;
+  saving: string;
+  saveFailed: string;
+  exportPng: string;
+  exportSvg: string;
+  exportMarkdown: string;
 }
 
 export interface WhiteboardInitPayload {
@@ -63,6 +86,10 @@ export type ParentToWhiteboardMessage = WhiteboardProtocolMessage &
         type: "pickFailed";
         payload: { requestId: string; message: string };
       }
+    | {
+        type: "saveState";
+        payload: { state: "saved" | "saving" | "error" };
+      }
   );
 
 export type WhiteboardToParentMessage = WhiteboardProtocolMessage &
@@ -84,7 +111,34 @@ export type WhiteboardToParentMessage = WhiteboardProtocolMessage &
         payload: {
           requestId: string;
           nodeId: string;
-          kind: "item" | "pdf";
+          kind: "item" | "pdf" | "note" | "attachment";
+        };
+      }
+    | {
+        type: "openItem";
+        payload: {
+          itemID?: number;
+          attachmentID?: number;
+          noteID?: number;
+          pdfPage?: number;
+        };
+      }
+    | {
+        type: "dropItems";
+        payload: {
+          requestId: string;
+          nodeId: string;
+          raw: Record<string, string>;
+        };
+      }
+    | {
+        type: "exportFile";
+        payload: {
+          requestId: string;
+          format: "png" | "svg" | "md";
+          mimeType: string;
+          dataUrl?: string;
+          text?: string;
         };
       }
   );

@@ -211,59 +211,108 @@ async function saveBoardAsset(
   return { relativePath };
 }
 
+function creatorsText(item: Zotero.Item): string {
+  const creators = item.getCreators?.() || [];
+  return creators
+    .map((creator: any) =>
+      creator.lastName
+        ? `${creator.firstName ? creator.firstName + " " : ""}${creator.lastName}`
+        : creator.name || "",
+    )
+    .filter(Boolean)
+    .join(", ");
+}
+
+function notePreview(item: Zotero.Item): string {
+  try {
+    const html = (item as any).getNote?.();
+    if (typeof html === "string") {
+      const text = html
+        .replace(/<[^>]+>/g, " ")
+        .replace(/&nbsp;/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      return text.slice(0, 220);
+    }
+  } catch {
+    // ignore
+  }
+  return "";
+}
+
 async function handlePickItem(
   session: WhiteboardSession,
   requestId: string,
   nodeId: string,
-  kind: "item" | "pdf",
+  kind: "item" | "pdf" | "note" | "attachment",
 ) {
   const editor = session.editor;
   if (!editor) return;
   try {
+    const itemIDs = pickZoteroItem(session.win, {
+      onlyRegularItems: kind === "item",
+    });
+    if (!itemIDs) return;
+    const item = Zotero.Items.get(itemIDs[0]);
+    if (!item) throw new Error("Item not found");
+
     if (kind === "item") {
-      const itemIDs = pickZoteroItem(session.win, { onlyRegularItems: true });
-      if (!itemIDs) return;
-      const item = Zotero.Items.get(itemIDs[0]);
-      if (!item) throw new Error("Item not found");
-      const creators = item.getCreators?.() || [];
-      const creatorText = creators
-        .map((creator: any) =>
-          creator.lastName
-            ? `${creator.firstName ? creator.firstName + " " : ""}${creator.lastName}`
-            : creator.name || "",
-        )
-        .filter(Boolean)
-        .join(", ");
+      if (!item.isRegularItem())
+        throw new Error("Selected item is not a regular item");
       const date = item.getField?.("date");
-      const subtitle = [creatorText, date].filter(Boolean).join(" · ");
       editor.resolvePick(requestId, nodeId, {
         kind: "item",
         title:
           (item as any).getDisplayTitle?.() ||
           item.getField?.("title") ||
           "Untitled",
-        subtitle,
+        subtitle: [creatorsText(item), date].filter(Boolean).join(" · "),
         itemID: item.id,
       });
       return;
     }
 
-    const itemIDs = pickZoteroItem(session.win, { onlyRegularItems: false });
-    if (!itemIDs) return;
-    const attachment = Zotero.Items.get(itemIDs[0]);
-    if (!attachment || !attachment.isAttachment()) {
+    if (kind === "note") {
+      if (!item.isNote?.()) throw new Error("Selected item is not a note");
+      const preview = notePreview(item);
+      editor.resolvePick(requestId, nodeId, {
+        kind: "note",
+        title: item.getField?.("title") || "Note",
+        preview: preview || "Empty note",
+        noteID: item.id,
+      });
+      return;
+    }
+
+    if (kind === "attachment") {
+      if (!item.isAttachment())
+        throw new Error("Selected item is not an attachment");
+      const filename =
+        item.attachmentFilename || item.getField?.("title") || "Attachment";
+      const size = (item as any).attachmentSize;
+      editor.resolvePick(requestId, nodeId, {
+        kind: "attachment",
+        title: filename,
+        subtitle: size ? `${Math.ceil(size / 1024)} KB` : "File",
+        attachmentID: item.id,
+      });
+      return;
+    }
+
+    // pdf
+    if (!item.isAttachment()) {
       throw new Error("Selected item is not an attachment");
     }
-    const filename = attachment.attachmentFilename || "";
+    const filename = item.attachmentFilename || "";
     const isPdf =
-      attachment.attachmentContentType === "application/pdf" ||
+      item.attachmentContentType === "application/pdf" ||
       /\.pdf$/i.test(filename);
     if (!isPdf) throw new Error("Selected attachment is not a PDF");
 
     const page = promptPageNumber(session.win);
     if (page == null) return;
 
-    const dataUrl = await renderPdfPageToDataUrl(attachment, page);
+    const dataUrl = await renderPdfPageToDataUrl(item, page);
     if (!dataUrl) {
       throw new Error("PDF page rendering is not available in this Zotero");
     }
@@ -276,10 +325,10 @@ async function handlePickItem(
     );
     editor.resolvePick(requestId, nodeId, {
       kind: "pdf",
-      title: filename || attachment.getField?.("title") || "PDF",
+      title: filename || item.getField?.("title") || "PDF",
       subtitle: `p. ${page}`,
       pdfPage: page,
-      attachmentID: attachment.id,
+      attachmentID: item.id,
       image: dataUrl,
       asset: relativePath,
     });
@@ -287,6 +336,203 @@ async function handlePickItem(
     editor.rejectPick(
       requestId,
       error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
+function openZoteroItem(payload: {
+  itemID?: number;
+  attachmentID?: number;
+  noteID?: number;
+  pdfPage?: number;
+}) {
+  const pane = Zotero.getActiveZoteroPane();
+  if (!pane) return;
+  if (payload.noteID) {
+    try {
+      (pane as any).openNoteWindow?.(payload.noteID);
+      return;
+    } catch {
+      // fall through to selectItem
+    }
+    pane.selectItem(payload.noteID);
+    return;
+  }
+  if (payload.attachmentID) {
+    const attachment = Zotero.Items.get(payload.attachmentID);
+    if (attachment) {
+      if (payload.pdfPage) {
+        try {
+          const reader = (Zotero as any).Reader;
+          if (reader?.open) {
+            void reader.open(attachment.id, { pageIndex: payload.pdfPage });
+            return;
+          }
+        } catch {
+          // fall back to the default file handler
+        }
+      }
+      void Zotero.FileHandlers.open(attachment);
+      return;
+    }
+    pane.selectItem(payload.attachmentID);
+    return;
+  }
+  if (payload.itemID) {
+    pane.selectItem(payload.itemID);
+  }
+}
+
+function parseDroppedItemID(raw: Record<string, string>): number | null {
+  for (const value of Object.values(raw)) {
+    if (!value) continue;
+    const direct = Number.parseInt(value, 10);
+    if (Number.isFinite(direct) && direct > 0) return direct;
+    try {
+      const parsed = JSON.parse(value);
+      if (typeof parsed === "number" && parsed > 0) return parsed;
+      if (Array.isArray(parsed)) {
+        for (const entry of parsed) {
+          const id =
+            typeof entry === "number"
+              ? entry
+              : entry && typeof entry === "object"
+                ? entry.itemID || entry.id
+                : null;
+          if (typeof id === "number" && id > 0) return id;
+        }
+      }
+      if (parsed && typeof parsed === "object") {
+        const id = parsed.itemID || parsed.id;
+        if (typeof id === "number" && id > 0) return id;
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return null;
+}
+
+async function handleDropItems(
+  session: WhiteboardSession,
+  requestId: string,
+  nodeId: string,
+  raw: Record<string, string>,
+) {
+  const editor = session.editor;
+  if (!editor) return;
+  try {
+    const itemID = parseDroppedItemID(raw);
+    if (!itemID) throw new Error("Could not parse dropped item");
+    const item = Zotero.Items.get(itemID);
+    if (!item) throw new Error("Dropped item not found");
+
+    if (item.isRegularItem()) {
+      const date = item.getField?.("date");
+      editor.resolvePick(requestId, nodeId, {
+        kind: "item",
+        title:
+          (item as any).getDisplayTitle?.() ||
+          item.getField?.("title") ||
+          "Untitled",
+        subtitle: [creatorsText(item), date].filter(Boolean).join(" · "),
+        itemID: item.id,
+      });
+      return;
+    }
+    if (item.isNote?.()) {
+      editor.resolvePick(requestId, nodeId, {
+        kind: "note",
+        title: item.getField?.("title") || "Note",
+        preview: notePreview(item) || "Empty note",
+        noteID: item.id,
+      });
+      return;
+    }
+    if (item.isAttachment()) {
+      const filename =
+        item.attachmentFilename || item.getField?.("title") || "Attachment";
+      const isPdf =
+        item.attachmentContentType === "application/pdf" ||
+        /\.pdf$/i.test(filename);
+      if (isPdf) {
+        const dataUrl = await renderPdfPageToDataUrl(item, 1);
+        if (!dataUrl) throw new Error("PDF page rendering is not available");
+        const parsed = dataUrlToBytes(dataUrl);
+        if (!parsed) throw new Error("Invalid rendered image data");
+        const { relativePath } = await saveBoardAsset(
+          session,
+          parsed.bytes,
+          parsed.mimeType,
+        );
+        editor.resolvePick(requestId, nodeId, {
+          kind: "pdf",
+          title: filename,
+          subtitle: "p. 1",
+          pdfPage: 1,
+          attachmentID: item.id,
+          image: dataUrl,
+          asset: relativePath,
+        });
+        return;
+      }
+      editor.resolvePick(requestId, nodeId, {
+        kind: "attachment",
+        title: filename,
+        subtitle: "File",
+        attachmentID: item.id,
+      });
+      return;
+    }
+    throw new Error("Unsupported dropped item type");
+  } catch (error) {
+    editor.rejectPick(
+      requestId,
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
+async function handleExportFile(
+  session: WhiteboardSession,
+  payload: {
+    requestId: string;
+    format: "png" | "svg" | "md";
+    mimeType: string;
+    dataUrl?: string;
+    text?: string;
+  },
+) {
+  try {
+    const extension =
+      payload.format === "png"
+        ? "png"
+        : payload.format === "svg"
+          ? "svg"
+          : "md";
+    const picked = await new ztoolkit.FilePicker(
+      getString("whiteboard-export-title"),
+      "save",
+      [[`${payload.format.toUpperCase()} (*.${extension})`, `*.${extension}`]],
+      `whiteboard.${extension}`,
+      session.win,
+    ).open();
+    if (!picked) return;
+    if (payload.dataUrl) {
+      const parsed = dataUrlToBytes(payload.dataUrl);
+      if (!parsed) throw new Error("Invalid image data");
+      await IOUtils.write(picked, parsed.bytes);
+    } else if (payload.text != null) {
+      await Zotero.File.putContentsAsync(picked, payload.text);
+    } else {
+      throw new Error("Nothing to export");
+    }
+    toast(getString("whiteboard-exported"), "success");
+  } catch (error) {
+    toast(
+      `${getString("whiteboard-export-failed")}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
     );
   }
 }
@@ -301,12 +547,44 @@ function scheduleAutosave(session: WhiteboardSession) {
   }, AUTOSAVE_MS);
 }
 
+async function cleanupUnusedAssets(
+  session: WhiteboardSession,
+  doc: ReturnType<typeof parseBoardDocument>,
+) {
+  try {
+    const root = boardStorageDir(session);
+    const assetsDir = PathUtils.join(root, "assets");
+    if (!(await IOUtils.exists(assetsDir))) return;
+    const referenced = new Set<string>();
+    for (const node of doc.nodes) {
+      const asset = node.data?.asset;
+      if (typeof asset === "string") {
+        referenced.add(asset.split("/").pop() || asset);
+      }
+    }
+    const children = await IOUtils.getChildren(assetsDir);
+    for (const name of children) {
+      if (referenced.has(name)) continue;
+      const full = PathUtils.join(assetsDir, name);
+      try {
+        const info = await IOUtils.stat(full);
+        if (info.type !== "directory") await IOUtils.remove(full);
+      } catch (error) {
+        ztoolkit.log("cleanup asset failed", name, error);
+      }
+    }
+  } catch (error) {
+    ztoolkit.log("cleanup unused whiteboard assets failed", error);
+  }
+}
+
 async function saveSession(
   session: WhiteboardSession,
   opts: { silent?: boolean } = {},
 ): Promise<boolean> {
   if (!session.editor) return false;
   if (!isDirty(session) && opts.silent) return true;
+  session.editor.setSaveState("saving");
   try {
     await session.editor.ready;
     const item = Zotero.Items.get(session.itemID);
@@ -318,17 +596,20 @@ async function saveSession(
     const shot = await session.editor.requestSnapshot();
     const doc = parseBoardDocument(shot.snapshot);
     session.path = await writeBoardFile(path, doc);
+    await cleanupUnusedAssets(session, doc);
     // Keep currentRev as-is: changes may have arrived while we were
     // awaiting the snapshot, and currentRev only moves forward via
     // onChange. savedRev tracks what is actually on disk.
     session.savedRev = shot.rev;
     session.title = attachmentTitle(item);
     refreshTabTitle(session);
+    session.editor.setSaveState("saved");
     if (!opts.silent) toast(getString("whiteboard-saved"), "success");
     return true;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     ztoolkit.log("Failed to save whiteboard", error);
+    session.editor.setSaveState("error");
     if (!opts.silent) {
       toast(`${getString("whiteboard-save-failed")}: ${message}`);
     }
@@ -414,6 +695,29 @@ function mountWhiteboardUI(
       undo: getString("whiteboard-undo"),
       redo: getString("whiteboard-redo"),
       save: getString("whiteboard-save"),
+      editText: getString("whiteboard-edit-text"),
+      copy: getString("whiteboard-copy"),
+      delete: getString("whiteboard-delete"),
+      openItem: getString("whiteboard-open-item"),
+      alignLeft: getString("whiteboard-align-left"),
+      alignRight: getString("whiteboard-align-right"),
+      alignTop: getString("whiteboard-align-top"),
+      alignBottom: getString("whiteboard-align-bottom"),
+      alignHorizontal: getString("whiteboard-align-horizontal"),
+      alignVertical: getString("whiteboard-align-vertical"),
+      distributeHorizontal: getString("whiteboard-distribute-horizontal"),
+      distributeVertical: getString("whiteboard-distribute-vertical"),
+      fitView: getString("whiteboard-fit-view"),
+      autoLayout: getString("whiteboard-auto-layout"),
+      edgeColor: getString("whiteboard-edge-color"),
+      edgeDash: getString("whiteboard-edge-dash"),
+      edgeArrow: getString("whiteboard-edge-arrow"),
+      saved: getString("whiteboard-save-saved"),
+      saving: getString("whiteboard-save-saving"),
+      saveFailed: getString("whiteboard-save-failed-short"),
+      exportPng: getString("whiteboard-export-png"),
+      exportSvg: getString("whiteboard-export-svg"),
+      exportMarkdown: getString("whiteboard-export-markdown"),
     },
     onChange(rev) {
       session.currentRev = rev;
@@ -428,6 +732,15 @@ function mountWhiteboardUI(
     },
     onPickItem(requestId, nodeId, kind) {
       void handlePickItem(session, requestId, nodeId, kind);
+    },
+    onOpenItem(payload) {
+      openZoteroItem(payload);
+    },
+    onDropItems(requestId, nodeId, raw) {
+      void handleDropItems(session, requestId, nodeId, raw);
+    },
+    onExportFile(payload) {
+      void handleExportFile(session, payload);
     },
   });
   bindSessionTheme(win, session);
