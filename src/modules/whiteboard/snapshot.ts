@@ -6,7 +6,16 @@
 export const BOARD_DOCUMENT_VERSION = 1;
 export const BOARD_ENGINE = "xyflow" as const;
 
-export type BoardNodeKind = "item" | "note" | "pdf" | "attachment";
+export type BoardNodeKind =
+  | "item"
+  | "note"
+  | "pdf"
+  | "attachment"
+  | "text"
+  | "rect"
+  | "ellipse"
+  | "line"
+  | "arrow";
 
 export interface BoardNodeData {
   kind: BoardNodeKind;
@@ -17,6 +26,10 @@ export interface BoardNodeData {
   noteID?: number;
   attachmentID?: number;
   pdfPage?: number;
+  /** Data URL of a rendered PDF page snapshot. */
+  image?: string;
+  /** Relative path of the saved snapshot file inside the board assets dir. */
+  asset?: string;
   [key: string]: unknown;
 }
 
@@ -53,7 +66,17 @@ export interface BoardDocument {
 
 export type WhiteboardSnapshot = BoardDocument;
 
-const KINDS = new Set<BoardNodeKind>(["item", "note", "pdf", "attachment"]);
+const KINDS = new Set<BoardNodeKind>([
+  "item",
+  "note",
+  "pdf",
+  "attachment",
+  "text",
+  "rect",
+  "ellipse",
+  "line",
+  "arrow",
+]);
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -63,10 +86,8 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 function parseNode(value: unknown): BoardNode | null {
   const node = asRecord(value);
   if (!node || typeof node.id !== "string") return null;
-  const type = node.type;
-  if (type !== "item" && type !== "note" && type !== "pdf" && type !== "attachment") {
-    return null;
-  }
+  const type = node.type as BoardNodeKind;
+  if (!KINDS.has(type)) return null;
   const position = asRecord(node.position);
   if (
     !position ||
@@ -95,6 +116,8 @@ function parseNode(value: unknown): BoardNode | null {
       attachmentID:
         typeof data.attachmentID === "number" ? data.attachmentID : undefined,
       pdfPage: typeof data.pdfPage === "number" ? data.pdfPage : undefined,
+      image: typeof data.image === "string" ? data.image : undefined,
+      asset: typeof data.asset === "string" ? data.asset : undefined,
     },
   };
 }
@@ -226,6 +249,11 @@ export function createBoardNode(
     note: { kind, title: "New note", preview: "" },
     pdf: { kind, title: "PDF page", subtitle: "Page 1", pdfPage: 1 },
     attachment: { kind, title: "Attachment", subtitle: "File" },
+    text: { kind, title: "Text" },
+    rect: { kind, title: "" },
+    ellipse: { kind, title: "" },
+    line: { kind, title: "" },
+    arrow: { kind, title: "" },
   };
   return { id, type: kind, position, data: titles[kind] };
 }

@@ -15,8 +15,10 @@ import {
   closeAllWhiteboards,
   closeWhiteboardsForWindow,
   injectWhiteboardStyles,
+  registerWhiteboardFileOpenInterceptor,
   registerWhiteboardMenus,
   registerWhiteboardTabHooks,
+  unregisterWhiteboardFileOpenInterceptor,
   unregisterWhiteboardMenus,
 } from "./modules/whiteboard";
 import { ensureDOMGlobals } from "./utils/dom";
@@ -32,6 +34,7 @@ async function onStartup() {
   initLocale();
   registerPrefs();
   registerFileOpenInterceptor();
+  registerWhiteboardFileOpenInterceptor();
   // Register global toolbar menus first. registerMenus() performs a global
   // cleanup, so per-window item context menus must be mounted afterwards.
   registerMenus();
@@ -92,6 +95,7 @@ async function onShutdown(): Promise<void> {
   await flushAllSessions();
   await closeAllWhiteboards();
   unregisterFileOpenInterceptor();
+  unregisterWhiteboardFileOpenInterceptor();
   unregisterMenus();
   unregisterShortcuts();
   ztoolkit.unregisterAll();

@@ -6,7 +6,7 @@
  * so the two iframes cannot accept each other's messages.
  */
 
-import type { BoardDocument } from "./snapshot";
+import type { BoardDocument, BoardNodeData } from "./snapshot";
 
 export const WHITEBOARD_MESSAGE_SOURCE = "zotero-markdown-whiteboard" as const;
 export const WHITEBOARD_PROTOCOL_VERSION = 1;
@@ -29,6 +29,15 @@ export interface WhiteboardLabels {
   addNote: string;
   addPdf: string;
   addFile: string;
+  addText: string;
+  addRect: string;
+  addEllipse: string;
+  addLine: string;
+  addArrow: string;
+  eraser: string;
+  undo: string;
+  redo: string;
+  save: string;
 }
 
 export interface WhiteboardInitPayload {
@@ -46,6 +55,14 @@ export type ParentToWhiteboardMessage = WhiteboardProtocolMessage &
     | { type: "command"; payload: { command: WhiteboardCommand } }
     | { type: "focus" }
     | { type: "destroy" }
+    | {
+        type: "itemPicked";
+        payload: { requestId: string; nodeId: string; data: BoardNodeData };
+      }
+    | {
+        type: "pickFailed";
+        payload: { requestId: string; message: string };
+      }
   );
 
 export type WhiteboardToParentMessage = WhiteboardProtocolMessage &
@@ -62,6 +79,14 @@ export type WhiteboardToParentMessage = WhiteboardProtocolMessage &
       }
     | { type: "save" }
     | { type: "error"; payload: { message: string } }
+    | {
+        type: "pickItem";
+        payload: {
+          requestId: string;
+          nodeId: string;
+          kind: "item" | "pdf";
+        };
+      }
   );
 
 export function isWhiteboardProtocolMessage(

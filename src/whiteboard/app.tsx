@@ -13,6 +13,8 @@ import {
   BackgroundVariant,
   Controls,
   MiniMap,
+  MarkerType,
+  ConnectionMode,
   ReactFlow,
   addEdge,
   applyEdgeChanges,
@@ -35,15 +37,40 @@ import {
   demoBoard,
   parseBoardDocument,
   type BoardDocument,
+  type BoardNodeData,
   type BoardNodeKind,
 } from "../modules/whiteboard/snapshot";
 import { boardNodeTypes, type AcademicNode } from "./nodes";
+import {
+  IconArrow,
+  IconEllipse,
+  IconEraser,
+  IconFile,
+  IconItem,
+  IconLine,
+  IconNote,
+  IconPdf,
+  IconRect,
+  IconRedo,
+  IconSave,
+  IconText,
+  IconUndo,
+} from "./icons";
 
 const DEFAULT_LABELS: WhiteboardLabels = {
   addItem: "Item",
   addNote: "Note",
   addPdf: "PDF",
   addFile: "File",
+  addText: "Text",
+  addRect: "Rect",
+  addEllipse: "Oval",
+  addLine: "Line",
+  addArrow: "Arrow",
+  eraser: "Eraser",
+  undo: "Undo",
+  redo: "Redo",
+  save: "Save",
 };
 
 export interface WhiteboardAppProps {
@@ -53,6 +80,8 @@ export interface WhiteboardAppProps {
   onReady: (api: WhiteboardRuntime) => void;
   onChange: (rev: number) => void;
   onError: (message: string) => void;
+  onSave: () => void;
+  onPickItem: (requestId: string, nodeId: string, kind: "item" | "pdf") => void;
 }
 
 export interface WhiteboardRuntime {
@@ -62,6 +91,8 @@ export interface WhiteboardRuntime {
   getSnapshot: () => BoardDocument;
   undo: () => void;
   redo: () => void;
+  resolvePick: (requestId: string, nodeId: string, data: BoardNodeData) => void;
+  rejectPick: (requestId: string, message: string) => void;
 }
 
 function newId(kind: string) {
@@ -127,6 +158,7 @@ export function WhiteboardApp(props: WhiteboardAppProps): ReactElement {
   const [labels, setLabels] = useState<WhiteboardLabels>(
     props.labels ?? DEFAULT_LABELS,
   );
+  const [eraser, setEraser] = useState(false);
   const viewportRef = useRef<Viewport>(
     initial.viewport ?? { x: 0, y: 0, zoom: 1 },
   );
@@ -136,6 +168,8 @@ export function WhiteboardApp(props: WhiteboardAppProps): ReactElement {
   const flowRef = useRef<ReactFlowInstance<AcademicNode> | null>(null);
   const propsRef = useRef(props);
   propsRef.current = props;
+  const pendingPicksRef = useRef(new Map<string, string>());
+  const runtimeRef = useRef<WhiteboardRuntime | null>(null);
 
   const bump = useCallback(() => {
     revRef.current += 1;
@@ -173,7 +207,7 @@ export function WhiteboardApp(props: WhiteboardAppProps): ReactElement {
       );
       if (structural) pushHistory();
       setNodes((current) => applyNodeChanges(changes, current));
-      bump();
+      if (changes.some((change) => change.type !== "select")) bump();
     },
     [bump, pushHistory],
   );
@@ -182,7 +216,7 @@ export function WhiteboardApp(props: WhiteboardAppProps): ReactElement {
     (changes: EdgeChange<Edge>[]) => {
       if (changes.some((change) => change.type === "remove")) pushHistory();
       setEdges((current) => applyEdgeChanges(changes, current));
-      bump();
+      if (changes.some((change) => change.type !== "select")) bump();
     },
     [bump, pushHistory],
   );
@@ -190,7 +224,9 @@ export function WhiteboardApp(props: WhiteboardAppProps): ReactElement {
   const onConnect = useCallback(
     (connection: Connection) => {
       pushHistory();
-      setEdges((current) => addEdge({ ...connection, id: newId("edge") }, current));
+      setEdges((current) =>
+        addEdge({ ...connection, id: newId("edge") }, current),
+      );
       bump();
     },
     [bump, pushHistory],
@@ -203,15 +239,42 @@ export function WhiteboardApp(props: WhiteboardAppProps): ReactElement {
         x: window.innerWidth / 2,
         y: window.innerHeight / 2,
       }) ?? { x: 120, y: 120 };
+      const nodeId = newId(kind);
       setNodes((current) => [
         ...current,
         toFlow({
           v: 1,
           engine: "xyflow",
-          nodes: [createBoardNode(kind, center, newId(kind))],
+          nodes: [createBoardNode(kind, center, nodeId)],
           edges: [],
         }).nodes[0],
       ]);
+      bump();
+      if (kind === "item" || kind === "pdf") {
+        const requestId = `pick-${nodeId}-${Date.now().toString(36)}`;
+        pendingPicksRef.current.set(requestId, nodeId);
+        propsRef.current.onPickItem(requestId, nodeId, kind);
+      }
+    },
+    [bump, pushHistory],
+  );
+
+  const eraseNode = useCallback(
+    (id: string) => {
+      pushHistory();
+      setNodes((current) => current.filter((node) => node.id !== id));
+      setEdges((current) =>
+        current.filter((edge) => edge.source !== id && edge.target !== id),
+      );
+      bump();
+    },
+    [bump, pushHistory],
+  );
+
+  const eraseEdge = useCallback(
+    (id: string) => {
+      pushHistory();
+      setEdges((current) => current.filter((edge) => edge.id !== id));
       bump();
     },
     [bump, pushHistory],
@@ -240,9 +303,25 @@ export function WhiteboardApp(props: WhiteboardAppProps): ReactElement {
         applyDocument(next);
         bump();
       },
+      resolvePick(requestId, nodeId, data) {
+        if (pendingPicksRef.current.get(requestId) !== nodeId) return;
+        pendingPicksRef.current.delete(requestId);
+        pushHistory();
+        setNodes((current) =>
+          current.map((node) =>
+            node.id === nodeId ? { ...node, data } : node,
+          ),
+        );
+        bump();
+      },
+      rejectPick(requestId, message) {
+        if (!pendingPicksRef.current.delete(requestId)) return;
+        propsRef.current.onError(message);
+      },
     };
+    runtimeRef.current = runtime;
     propsRef.current.onReady(runtime);
-  }, [applyDocument, bump, snapshotNow]);
+  }, [applyDocument, bump, pushHistory, snapshotNow]);
   // onReady once: getSnapshot/undo read refs, so they stay current.
 
   useEffect(() => {
@@ -250,19 +329,105 @@ export function WhiteboardApp(props: WhiteboardAppProps): ReactElement {
   }, [props.theme]);
 
   return (
-    <div className="zmd-board-host" data-theme={theme}>
+    <div
+      className={`zmd-board-host${eraser ? " is-eraser" : ""}`}
+      data-theme={theme}
+    >
       <div className="zmd-board-toolbar">
-        <button type="button" onClick={() => addNode("item")}>
-          {labels.addItem}
+        <button
+          type="button"
+          title={labels.addItem}
+          onClick={() => addNode("item")}
+        >
+          <IconItem />
         </button>
-        <button type="button" onClick={() => addNode("note")}>
-          {labels.addNote}
+        <button
+          type="button"
+          title={labels.addNote}
+          onClick={() => addNode("note")}
+        >
+          <IconNote />
         </button>
-        <button type="button" onClick={() => addNode("pdf")}>
-          {labels.addPdf}
+        <button
+          type="button"
+          title={labels.addPdf}
+          onClick={() => addNode("pdf")}
+        >
+          <IconPdf />
         </button>
-        <button type="button" onClick={() => addNode("attachment")}>
-          {labels.addFile}
+        <button
+          type="button"
+          title={labels.addFile}
+          onClick={() => addNode("attachment")}
+        >
+          <IconFile />
+        </button>
+        <span className="zmd-board-toolbar-sep" />
+        <button
+          type="button"
+          title={labels.addText}
+          onClick={() => addNode("text")}
+        >
+          <IconText />
+        </button>
+        <button
+          type="button"
+          title={labels.addRect}
+          onClick={() => addNode("rect")}
+        >
+          <IconRect />
+        </button>
+        <button
+          type="button"
+          title={labels.addEllipse}
+          onClick={() => addNode("ellipse")}
+        >
+          <IconEllipse />
+        </button>
+        <button
+          type="button"
+          title={labels.addLine}
+          onClick={() => addNode("line")}
+        >
+          <IconLine />
+        </button>
+        <button
+          type="button"
+          title={labels.addArrow}
+          onClick={() => addNode("arrow")}
+        >
+          <IconArrow />
+        </button>
+        <span className="zmd-board-toolbar-sep" />
+        <button
+          type="button"
+          title={labels.eraser}
+          className={eraser ? "is-active" : ""}
+          onClick={() => setEraser((value) => !value)}
+        >
+          <IconEraser />
+        </button>
+        <span className="zmd-board-toolbar-sep" />
+        <button
+          type="button"
+          title={labels.undo}
+          onClick={() => runtimeRef.current?.undo()}
+        >
+          <IconUndo />
+        </button>
+        <button
+          type="button"
+          title={labels.redo}
+          onClick={() => runtimeRef.current?.redo()}
+        >
+          <IconRedo />
+        </button>
+        <button
+          type="button"
+          title={labels.save}
+          onClick={propsRef.current.onSave}
+        >
+          <IconSave />
         </button>
       </div>
       <ReactFlow<AcademicNode>
@@ -271,6 +436,13 @@ export function WhiteboardApp(props: WhiteboardAppProps): ReactElement {
         nodeTypes={boardNodeTypes}
         defaultViewport={initial.viewport}
         fitView={!props.initialSnapshot}
+        connectionMode={ConnectionMode.Loose}
+        defaultEdgeOptions={{
+          type: "smoothstep",
+          markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
+        }}
+        snapToGrid
+        snapGrid={[16, 16]}
         deleteKeyCode={["Backspace", "Delete"]}
         onInit={(instance) => {
           flowRef.current = instance;
@@ -278,9 +450,33 @@ export function WhiteboardApp(props: WhiteboardAppProps): ReactElement {
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
+        nodesDraggable={!eraser}
+        nodesConnectable={!eraser}
+        onNodeClick={(event, node) => {
+          if (!eraser) return;
+          event.preventDefault();
+          eraseNode(node.id);
+        }}
+        onEdgeClick={(event, edge) => {
+          if (!eraser) return;
+          event.preventDefault();
+          eraseEdge(edge.id);
+        }}
+        onPaneClick={() => {
+          if (eraser) setEraser(false);
+        }}
         onNodeDragStart={pushHistory}
         onMoveEnd={(_, viewport) => {
+          const previous = viewportRef.current;
+          if (
+            previous.x === viewport.x &&
+            previous.y === viewport.y &&
+            previous.zoom === viewport.zoom
+          ) {
+            return;
+          }
           viewportRef.current = viewport;
+          bump();
         }}
         proOptions={{ hideAttribution: true }}
       >

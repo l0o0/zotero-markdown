@@ -6,3 +6,4 @@ menuitem-new-whiteboard = 新建白板…
 whiteboard-tab-title = 白板
 whiteboard-open = 打开
 whiteboard-save = 保存
+menuitem-open-whiteboard = 打开白板

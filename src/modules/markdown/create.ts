@@ -53,13 +53,15 @@ export async function createMarkdownAttachment(
     // Standalone attachments need a real libraryID; fall back to user library.
     // Child attachments inherit library from parentItemID (do not pass both
     // parentItemID and collections — Zotero throws).
+    const selectedLibraryIDs = pane?.getSelectedLibraryIDs?.();
     const libraryID =
       parent?.libraryID ??
-      (pane?.getSelectedLibraryID?.() as number | undefined) ??
+      (selectedLibraryIDs?.[0] as number | undefined) ??
       Zotero.Libraries.userLibraryID;
 
+    const selectedCollections = pane?.getSelectedCollections?.(true);
     const collection = !parent
-      ? (pane?.getSelectedCollection?.(true) as number | false | undefined)
+      ? (selectedCollections?.[0] as number | undefined)
       : undefined;
     const collections =
       typeof collection === "number" && collection > 0

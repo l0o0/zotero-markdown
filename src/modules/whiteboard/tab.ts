@@ -2,19 +2,14 @@ import { resolveEditorTheme } from "../markdown/editor";
 import { getString } from "../../utils/locale";
 import { ensureDOMGlobals } from "../../utils/dom";
 import { createWhiteboardEditor } from "./editor";
-import {
-  basename,
-  pickBoardFile,
-  readBoardFile,
-  writeBoardFile,
-} from "./file-io";
+import { writeBoardFile } from "./file-io";
 import { parseBoardDocument } from "./snapshot";
 import { whiteboardChannel } from "./protocol";
-import {
-  whiteboardRegistry,
-  type WhiteboardSession,
-} from "./session-registry";
+import { whiteboardRegistry, type WhiteboardSession } from "./session-registry";
 import { WHITEBOARD_TAB_TYPE } from "./tabHooks";
+import { isWhiteboardAttachment } from "./detect";
+
+const AUTOSAVE_MS = 800;
 
 function newBoardId() {
   try {
@@ -62,11 +57,16 @@ function bindSessionTheme(
   sync();
 }
 
+function attachmentTitle(item: Zotero.Item) {
+  return (
+    item.attachmentFilename ||
+    item.getField("title") ||
+    getString("whiteboard-tab-title")
+  );
+}
+
 function refreshTabTitle(session: WhiteboardSession) {
   const dirty = isDirty(session) ? " *" : "";
-  if (session.view?.titleEl) {
-    session.view.titleEl.textContent = `${session.title}${dirty}`;
-  }
   const { tab } = session.win.Zotero_Tabs._getTab(session.tabID) || {};
   if (!tab) return;
   tab.title = `${session.title}${dirty}`;
@@ -83,52 +83,256 @@ function toast(message: string, type: "success" | "fail" = "fail") {
     .show();
 }
 
+function pickZoteroItem(
+  win: Window,
+  opts: { onlyRegularItems?: boolean } = {},
+): number[] | null {
+  const Services = ztoolkit.getGlobal("Services") as {
+    ww: {
+      openWindow: (
+        parent: Window | null,
+        url: string,
+        name: string,
+        features: string,
+        args: unknown,
+      ) => void;
+    };
+  };
+  const io: {
+    dataOut?: number[] | null;
+    singleSelection: boolean;
+    onlyRegularItems?: boolean;
+    multiSelect: boolean;
+  } = {
+    dataOut: null,
+    singleSelection: true,
+    onlyRegularItems: opts.onlyRegularItems,
+    multiSelect: false,
+  };
+  Services.ww.openWindow(
+    null,
+    "chrome://zotero/content/selectItemsDialog.xhtml",
+    "",
+    "chrome,modal,centerscreen,resizable=yes",
+    io,
+  );
+  return io.dataOut?.length ? io.dataOut : null;
+}
+
+function promptPageNumber(win: Window): number | null {
+  const Services = ztoolkit.getGlobal("Services") as {
+    prompt: {
+      prompt: (
+        parent: Window,
+        title: string,
+        text: string,
+        value: { value: string },
+        checkMsg: string | null,
+        checkState: { value: boolean },
+      ) => boolean;
+    };
+  };
+  const value = { value: "1" };
+  const ok = Services.prompt.prompt(
+    win,
+    getString("whiteboard-pdf-page-title"),
+    getString("whiteboard-pdf-page-prompt"),
+    value,
+    null,
+    { value: false },
+  );
+  if (!ok) return null;
+  const page = Number.parseInt(value.value, 10);
+  return Number.isFinite(page) && page > 0 ? page : null;
+}
+
+function dataUrlToBytes(
+  dataUrl: string,
+): { bytes: Uint8Array; mimeType: string } | null {
+  const match = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(dataUrl);
+  if (!match) return null;
+  const mimeType = match[1] || "image/png";
+  const payload = match[3];
+  let bytes: Uint8Array;
+  if (match[2]) {
+    const binary = atob(payload);
+    bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+  } else {
+    bytes = new TextEncoder().encode(decodeURIComponent(payload));
+  }
+  return { bytes, mimeType };
+}
+
+async function renderPdfPageToDataUrl(
+  attachment: Zotero.Item,
+  pageIndex: number,
+): Promise<string | null> {
+  const worker = (Zotero as any).PDFWorker;
+  if (!worker?.getPageImage) return null;
+  const result = await worker.getPageImage(attachment, pageIndex, 1.5);
+  if (typeof result === "string") return result;
+  if (result && typeof result === "object") {
+    if (typeof result.dataURL === "string") return result.dataURL;
+    if (typeof result.dataUrl === "string") return result.dataUrl;
+    if (typeof result.image === "string") return result.image;
+    if (typeof result.data === "string") return result.data;
+  }
+  return null;
+}
+
+function boardStorageDir(session: WhiteboardSession): string {
+  try {
+    const item = Zotero.Items.get(session.itemID);
+    if (item) {
+      const dir = Zotero.Attachments.getStorageDirectory(item);
+      if (dir?.path) return dir.path;
+    }
+  } catch {
+    // ignore
+  }
+  return PathUtils.parent(session.path) ?? session.path;
+}
+
+async function saveBoardAsset(
+  session: WhiteboardSession,
+  bytes: Uint8Array,
+  mimeType: string,
+): Promise<{ relativePath: string }> {
+  const root = boardStorageDir(session);
+  const assetsDir = PathUtils.join(root, "assets");
+  await IOUtils.makeDirectory(assetsDir, { ignoreExisting: true });
+  const extension = mimeType === "image/jpeg" ? "jpg" : "png";
+  const filename = `page-${Date.now()}-${Math.random().toString(16).slice(2, 6)}.${extension}`;
+  const relativePath = `assets/${filename}`;
+  await IOUtils.write(PathUtils.join(assetsDir, filename), bytes);
+  return { relativePath };
+}
+
+async function handlePickItem(
+  session: WhiteboardSession,
+  requestId: string,
+  nodeId: string,
+  kind: "item" | "pdf",
+) {
+  const editor = session.editor;
+  if (!editor) return;
+  try {
+    if (kind === "item") {
+      const itemIDs = pickZoteroItem(session.win, { onlyRegularItems: true });
+      if (!itemIDs) return;
+      const item = Zotero.Items.get(itemIDs[0]);
+      if (!item) throw new Error("Item not found");
+      const creators = item.getCreators?.() || [];
+      const creatorText = creators
+        .map((creator: any) =>
+          creator.lastName
+            ? `${creator.firstName ? creator.firstName + " " : ""}${creator.lastName}`
+            : creator.name || "",
+        )
+        .filter(Boolean)
+        .join(", ");
+      const date = item.getField?.("date");
+      const subtitle = [creatorText, date].filter(Boolean).join(" · ");
+      editor.resolvePick(requestId, nodeId, {
+        kind: "item",
+        title:
+          (item as any).getDisplayTitle?.() ||
+          item.getField?.("title") ||
+          "Untitled",
+        subtitle,
+        itemID: item.id,
+      });
+      return;
+    }
+
+    const itemIDs = pickZoteroItem(session.win, { onlyRegularItems: false });
+    if (!itemIDs) return;
+    const attachment = Zotero.Items.get(itemIDs[0]);
+    if (!attachment || !attachment.isAttachment()) {
+      throw new Error("Selected item is not an attachment");
+    }
+    const filename = attachment.attachmentFilename || "";
+    const isPdf =
+      attachment.attachmentContentType === "application/pdf" ||
+      /\.pdf$/i.test(filename);
+    if (!isPdf) throw new Error("Selected attachment is not a PDF");
+
+    const page = promptPageNumber(session.win);
+    if (page == null) return;
+
+    const dataUrl = await renderPdfPageToDataUrl(attachment, page);
+    if (!dataUrl) {
+      throw new Error("PDF page rendering is not available in this Zotero");
+    }
+    const parsed = dataUrlToBytes(dataUrl);
+    if (!parsed) throw new Error("Invalid rendered image data");
+    const { relativePath } = await saveBoardAsset(
+      session,
+      parsed.bytes,
+      parsed.mimeType,
+    );
+    editor.resolvePick(requestId, nodeId, {
+      kind: "pdf",
+      title: filename || attachment.getField?.("title") || "PDF",
+      subtitle: `p. ${page}`,
+      pdfPage: page,
+      attachmentID: attachment.id,
+      image: dataUrl,
+      asset: relativePath,
+    });
+  } catch (error) {
+    editor.rejectPick(
+      requestId,
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
+function scheduleAutosave(session: WhiteboardSession) {
+  if (session.autosaveTimer) {
+    session.win.clearTimeout(session.autosaveTimer);
+  }
+  session.autosaveTimer = session.win.setTimeout(() => {
+    session.autosaveTimer = undefined;
+    void saveSession(session, { silent: true });
+  }, AUTOSAVE_MS);
+}
+
 async function saveSession(
   session: WhiteboardSession,
-  opts: { saveAs?: boolean } = {},
+  opts: { silent?: boolean } = {},
 ): Promise<boolean> {
   if (!session.editor) return false;
+  if (!isDirty(session) && opts.silent) return true;
   try {
     await session.editor.ready;
+    const item = Zotero.Items.get(session.itemID);
+    if (!item || !isWhiteboardAttachment(item)) {
+      throw new Error("Board attachment is gone");
+    }
+    const path = (await item.getFilePathAsync()) || session.path;
+    if (!path) throw new Error("Board file not found");
     const shot = await session.editor.requestSnapshot();
     const doc = parseBoardDocument(shot.snapshot);
-    let path: string | undefined = session.path;
-    if (opts.saveAs || !path) {
-      const picked = await pickBoardFile("save", session.win, session.path);
-      if (!picked) return false;
-      path = picked;
-    }
     session.path = await writeBoardFile(path, doc);
-    session.title = basename(session.path);
-    session.currentRev = shot.rev;
+    // Keep currentRev as-is: changes may have arrived while we were
+    // awaiting the snapshot, and currentRev only moves forward via
+    // onChange. savedRev tracks what is actually on disk.
     session.savedRev = shot.rev;
+    session.title = attachmentTitle(item);
     refreshTabTitle(session);
-    toast(getString("whiteboard-saved"), "success");
+    if (!opts.silent) toast(getString("whiteboard-saved"), "success");
     return true;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     ztoolkit.log("Failed to save whiteboard", error);
-    toast(`${getString("whiteboard-save-failed")}: ${message}`);
+    if (!opts.silent) {
+      toast(`${getString("whiteboard-save-failed")}: ${message}`);
+    }
     return false;
-  }
-}
-
-async function openBoardIntoSession(session: WhiteboardSession) {
-  if (!session.editor) return;
-  const path = await pickBoardFile("open", session.win, session.path);
-  if (!path) return;
-  try {
-    const doc = await readBoardFile(path);
-    session.editor.loadSnapshot(doc);
-    session.path = path;
-    session.title = basename(path);
-    session.currentRev = 0;
-    session.savedRev = 0;
-    refreshTabTitle(session);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    ztoolkit.log("Failed to open whiteboard", error);
-    toast(`${getString("whiteboard-open-failed")}: ${message}`);
   }
 }
 
@@ -175,61 +379,46 @@ function promptUnsaved(win: Window): "save" | "discard" {
   }
 }
 
-function chromeButton(doc: Document, label: string, onClick: () => void) {
-  const button = doc.createElement("button");
-  button.type = "button";
-  button.className = "zotero-whiteboard-btn";
-  button.textContent = label;
-  button.addEventListener("click", onClick);
-  return button;
-}
-
 function mountWhiteboardUI(
   win: _ZoteroTypes.MainWindow,
   container: HTMLElement,
   session: WhiteboardSession,
+  initialSnapshot: unknown,
 ) {
   const doc = container.ownerDocument;
   const root = doc.createElement("div");
   root.className = "zotero-whiteboard-root zotero-markdown-root";
 
-  const toolbar = doc.createElement("div");
-  toolbar.className = "zotero-whiteboard-toolbar";
-
-  const titleEl = doc.createElement("div");
-  titleEl.className = "zotero-whiteboard-title";
-  titleEl.textContent = session.title;
-
-  const actions = doc.createElement("div");
-  actions.className = "zotero-whiteboard-actions";
-  const openBtn = chromeButton(doc, getString("whiteboard-open"), () => {
-    void openBoardIntoSession(session);
-  });
-  const saveBtn = chromeButton(doc, getString("whiteboard-save"), () => {
-    void saveSession(session);
-  });
-  actions.append(openBtn, saveBtn);
-  toolbar.append(titleEl, actions);
-
   const host = doc.createElement("div");
   host.className = "zotero-whiteboard-host";
 
-  root.append(toolbar, host);
+  root.appendChild(host);
   container.appendChild(root);
 
-  session.view = { root, host, titleEl, openBtn, saveBtn };
+  session.view = { root, host };
   session.editor = createWhiteboardEditor(host, {
     win,
     channel: whiteboardChannel(session.tabID, session.boardId),
+    snapshot: parseBoardDocument(initialSnapshot),
     labels: {
       addItem: getString("whiteboard-add-item"),
       addNote: getString("whiteboard-add-note"),
       addPdf: getString("whiteboard-add-pdf"),
       addFile: getString("whiteboard-add-file"),
+      addText: getString("whiteboard-add-text"),
+      addRect: getString("whiteboard-add-rect"),
+      addEllipse: getString("whiteboard-add-ellipse"),
+      addLine: getString("whiteboard-add-line"),
+      addArrow: getString("whiteboard-add-arrow"),
+      eraser: getString("whiteboard-eraser"),
+      undo: getString("whiteboard-undo"),
+      redo: getString("whiteboard-redo"),
+      save: getString("whiteboard-save"),
     },
     onChange(rev) {
       session.currentRev = rev;
       refreshTabTitle(session);
+      scheduleAutosave(session);
     },
     onSave() {
       void saveSession(session);
@@ -237,13 +426,18 @@ function mountWhiteboardUI(
     onError(message) {
       toast(message);
     },
+    onPickItem(requestId, nodeId, kind) {
+      void handlePickItem(session, requestId, nodeId, kind);
+    },
   });
   bindSessionTheme(win, session);
 }
 
 export async function openWhiteboardTab(
+  item: Zotero.Item,
   options: { win?: _ZoteroTypes.MainWindow } = {},
 ): Promise<string | null> {
+  if (!isWhiteboardAttachment(item)) return null;
   const win =
     options.win ||
     (Zotero.getMainWindow() as _ZoteroTypes.MainWindow | undefined);
@@ -253,13 +447,54 @@ export async function openWhiteboardTab(
   }
 
   ensureDOMGlobals(win);
-  const boardId = newBoardId();
-  const title = getString("whiteboard-tab-title");
 
+  const existing = whiteboardRegistry.findByItem(item.id);
+  if (existing) {
+    const existingWin = existing.win;
+    const tabInfo = existingWin.Zotero_Tabs._getTab(existing.tabID);
+    if (tabInfo?.tab) {
+      if (existingWin !== win) {
+        try {
+          existingWin.focus();
+        } catch {
+          // ignore
+        }
+      }
+      try {
+        existingWin.Zotero_Tabs.select(existing.tabID);
+      } catch {
+        existingWin.Zotero_Tabs.select(existing.tabID);
+      }
+      existing.editor?.focus();
+      return existing.tabID;
+    }
+    whiteboardRegistry.unregister(existing.tabID);
+  }
+
+  const path = await item.getFilePathAsync();
+  if (!path) {
+    toast(getString("whiteboard-open-failed"));
+    return null;
+  }
+
+  let initial: unknown = {};
+  try {
+    const text = (await Zotero.File.getContentsAsync(path)) as string;
+    if (text.trim()) {
+      initial = JSON.parse(text);
+    }
+  } catch (error) {
+    ztoolkit.log("Failed to read whiteboard file", error);
+    toast(getString("whiteboard-open-failed"));
+    return null;
+  }
+
+  const boardId = newBoardId();
+  const title = attachmentTitle(item);
   const { id: tabID, container } = win.Zotero_Tabs.add({
     type: WHITEBOARD_TAB_TYPE,
     title,
-    data: { boardId },
+    data: { itemID: item.id, boardId },
     select: false,
     onClose: () => {
       void closeWhiteboardSession(tabID);
@@ -277,7 +512,9 @@ export async function openWhiteboardTab(
   const session: WhiteboardSession = {
     tabID,
     boardId,
+    itemID: item.id,
     win,
+    path,
     title,
     currentRev: 0,
     savedRev: 0,
@@ -285,7 +522,7 @@ export async function openWhiteboardTab(
   whiteboardRegistry.register(session);
 
   try {
-    mountWhiteboardUI(win, host, session);
+    mountWhiteboardUI(win, host, session, initial);
   } catch (error) {
     ztoolkit.log("Failed to mount whiteboard", error);
     whiteboardRegistry.unregister(tabID);
@@ -304,6 +541,7 @@ export async function openWhiteboardTab(
     refreshTabTitle(session);
     win.Zotero_Tabs.select(tabID);
   }
+  win.setTimeout(() => session.editor?.focus(), 50);
 
   return tabID;
 }
@@ -311,11 +549,13 @@ export async function openWhiteboardTab(
 export async function closeWhiteboardSession(tabID: string) {
   const session = whiteboardRegistry.get(tabID);
   if (!session || session.closing) return;
+  if (session.autosaveTimer) {
+    session.win.clearTimeout(session.autosaveTimer);
+    session.autosaveTimer = undefined;
+  }
   if (isDirty(session)) {
     const choice = promptUnsaved(session.win);
-    if (choice === "save") {
-      await saveSession(session);
-    }
+    if (choice === "save") await saveSession(session);
   }
   session.closing = true;
   session.unbindTheme?.();

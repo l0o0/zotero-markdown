@@ -6,3 +6,4 @@ menuitem-new-whiteboard = New Whiteboard…
 whiteboard-tab-title = Whiteboard
 whiteboard-open = Open
 whiteboard-save = Save
+menuitem-open-whiteboard = Open Whiteboard

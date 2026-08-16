@@ -36,7 +36,7 @@ test("keeps academic node kinds and drops unknown records", () => {
   assert.equal(doc.edges[0].target, "missing");
 });
 
-test("serializes a board as pretty JSON with a zmdboard suffix", () => {
+test("serializes a board as pretty JSON with a board suffix", () => {
   const json = serializeBoardDocument(
     parseBoardDocument({
       nodes: [
@@ -51,12 +51,24 @@ test("serializes a board as pretty JSON with a zmdboard suffix", () => {
   );
   assert.match(json, /"engine": "xyflow"/);
   assert.match(json, /"title": "Hello"/);
-  assert.equal(ensureBoardExtension("/tmp/board"), "/tmp/board.zmdboard");
+  assert.equal(ensureBoardExtension("/tmp/board"), "/tmp/board.board");
   assert.equal(ensureBoardExtension("/tmp/board.json"), "/tmp/board.json");
+  assert.equal(
+    ensureBoardExtension("/tmp/board.zmdboard"),
+    "/tmp/board.zmdboard",
+  );
 });
 
 test("createBoardNode stamps a kind-specific placeholder", () => {
   const pdf = createBoardNode("pdf", { x: 1, y: 2 }, "pdf-1");
   assert.equal(pdf.type, "pdf");
   assert.equal(pdf.data.pdfPage, 1);
+
+  const arrow = createBoardNode("arrow", { x: 0, y: 0 }, "arrow-1");
+  assert.equal(arrow.type, "arrow");
+  assert.equal(arrow.data.kind, "arrow");
+
+  const line = createBoardNode("line", { x: 0, y: 0 }, "line-1");
+  assert.equal(line.type, "line");
+  assert.equal(line.data.kind, "line");
 });

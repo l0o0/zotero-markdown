@@ -13,6 +13,7 @@ import {
   type WhiteboardTheme,
   type WhiteboardToParentMessage,
 } from "./protocol";
+import type { BoardNodeData } from "./snapshot";
 
 export interface WhiteboardHandle {
   ready: Promise<void>;
@@ -25,6 +26,8 @@ export interface WhiteboardHandle {
     snapshot: WhiteboardSnapshot;
   }>;
   command: (command: "undo" | "redo") => void;
+  resolvePick: (requestId: string, nodeId: string, data: BoardNodeData) => void;
+  rejectPick: (requestId: string, message: string) => void;
 }
 
 function whiteboardPageURL() {
@@ -35,7 +38,15 @@ function whiteboardPageURL() {
 type PendingCommand = Extract<
   ParentToWhiteboardMessage,
   {
-    type: "init" | "setTheme" | "loadSnapshot" | "command" | "focus" | "destroy";
+    type:
+      | "init"
+      | "setTheme"
+      | "loadSnapshot"
+      | "command"
+      | "focus"
+      | "destroy"
+      | "itemPicked"
+      | "pickFailed";
   }
 >;
 
@@ -49,6 +60,11 @@ export function createWhiteboardEditor(
     onChange?: (rev: number) => void;
     onSave?: () => void;
     onError?: (message: string) => void;
+    onPickItem?: (
+      requestId: string,
+      nodeId: string,
+      kind: "item" | "pdf",
+    ) => void;
   } = {},
 ): WhiteboardHandle {
   const ownerWin =
@@ -165,6 +181,13 @@ export function createWhiteboardEditor(
       case "save":
         options.onSave?.();
         break;
+      case "pickItem":
+        options.onPickItem?.(
+          data.payload.requestId,
+          data.payload.nodeId,
+          data.payload.kind,
+        );
+        break;
       case "error":
         options.onError?.(data.payload.message);
         break;
@@ -233,6 +256,20 @@ export function createWhiteboardEditor(
         source: WHITEBOARD_MESSAGE_SOURCE,
         type: "command",
         payload: { command },
+      });
+    },
+    resolvePick(requestId, nodeId, data) {
+      sendOrQueue({
+        source: WHITEBOARD_MESSAGE_SOURCE,
+        type: "itemPicked",
+        payload: { requestId, nodeId, data },
+      });
+    },
+    rejectPick(requestId, message) {
+      sendOrQueue({
+        source: WHITEBOARD_MESSAGE_SOURCE,
+        type: "pickFailed",
+        payload: { requestId, message },
       });
     },
   };

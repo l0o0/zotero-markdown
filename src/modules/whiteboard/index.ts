@@ -1,12 +1,17 @@
-export { openWhiteboardTab, closeAllWhiteboards, closeWhiteboardsForWindow } from "./tab";
 export {
-  registerWhiteboardTabHooks,
-  WHITEBOARD_TAB_TYPE,
-} from "./tabHooks";
+  openWhiteboardTab,
+  closeAllWhiteboards,
+  closeWhiteboardsForWindow,
+} from "./tab";
+export { registerWhiteboardTabHooks, WHITEBOARD_TAB_TYPE } from "./tabHooks";
+export { registerWhiteboardMenus, unregisterWhiteboardMenus } from "./menu";
+export { createWhiteboardAttachment } from "./create";
+export { isWhiteboardAttachment } from "./detect";
 export {
-  registerWhiteboardMenus,
-  unregisterWhiteboardMenus,
-} from "./menu";
+  openWhiteboardAttachment,
+  registerWhiteboardFileOpenInterceptor,
+  unregisterWhiteboardFileOpenInterceptor,
+} from "./open";
 export { injectWhiteboardStyles } from "./styles";
 export {
   serializeBoardDocument,

@@ -1,13 +1,7 @@
 import { getString } from "../../utils/locale";
-import {
-  parseBoardDocument,
-  type BoardDocument,
-} from "./snapshot";
+import { parseBoardDocument, type BoardDocument } from "./snapshot";
 
-const BOARD_FILTER: [string, string] = [
-  "Research Board (*.zmdboard)",
-  "*.zmdboard",
-];
+const BOARD_FILTER: [string, string] = ["Research Board (*.board)", "*.board"];
 
 export function serializeBoardDocument(doc: BoardDocument): string {
   return `${JSON.stringify(parseBoardDocument(doc), null, 2)}\n`;
@@ -18,13 +12,13 @@ export function basename(path: string): string {
 }
 
 export function ensureBoardExtension(path: string): string {
-  return /\.(zmdboard|json)$/i.test(path) ? path : `${path}.zmdboard`;
+  return /\.(board|zmdboard|json)$/i.test(path) ? path : `${path}.board`;
 }
 
 export async function pickBoardFile(
   mode: "open" | "save",
   win?: Window,
-  suggestion = "whiteboard.zmdboard",
+  suggestion = "whiteboard.board",
 ): Promise<string | null> {
   const title = getString(
     mode === "open" ? "whiteboard-open" : "whiteboard-save",

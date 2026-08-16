@@ -15,8 +15,7 @@ import {
   type WhiteboardTheme,
 } from "../modules/whiteboard/protocol";
 
-const channel =
-  new URL(window.location.href).searchParams.get("channel") || "";
+const channel = new URL(window.location.href).searchParams.get("channel") || "";
 
 let theme: WhiteboardTheme = "light";
 let pendingSnapshot: WhiteboardSnapshot | null = null;
@@ -25,7 +24,7 @@ let runtime: WhiteboardRuntime | null = null;
 let rev = 0;
 
 function postToParent(message: {
-  type: "ready" | "change" | "snapshot" | "save" | "error";
+  type: "ready" | "change" | "snapshot" | "save" | "error" | "pickItem";
   payload?: unknown;
 }) {
   window.parent?.postMessage(
@@ -69,13 +68,24 @@ function handleParentMessage(data: ParentToWhiteboardMessage) {
         payload: {
           requestId: data.payload.requestId,
           rev,
-          snapshot: runtime?.getSnapshot() ?? pendingSnapshot ?? { v: 1, engine: "xyflow", nodes: [], edges: [] },
+          snapshot: runtime?.getSnapshot() ??
+            pendingSnapshot ?? { v: 1, engine: "xyflow", nodes: [], edges: [] },
         },
       });
       break;
     case "command":
       if (data.payload.command === "undo") runtime?.undo();
       if (data.payload.command === "redo") runtime?.redo();
+      break;
+    case "itemPicked":
+      runtime?.resolvePick(
+        data.payload.requestId,
+        data.payload.nodeId,
+        data.payload.data,
+      );
+      break;
+    case "pickFailed":
+      runtime?.rejectPick(data.payload.requestId, data.payload.message);
       break;
     case "focus":
       window.focus();
@@ -116,9 +126,22 @@ function boot() {
   applyDocumentTheme("light");
   window.addEventListener("message", onWindowMessage);
   window.addEventListener("keydown", (event) => {
-    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
+    if (!(event.metaKey || event.ctrlKey)) return;
+    const key = event.key.toLowerCase();
+    if (key === "s") {
       event.preventDefault();
       postToParent({ type: "save" });
+      return;
+    }
+    if (key === "z") {
+      event.preventDefault();
+      if (event.shiftKey) runtime?.redo();
+      else runtime?.undo();
+      return;
+    }
+    if (key === "y") {
+      event.preventDefault();
+      runtime?.redo();
     }
   });
   createRoot(host).render(
@@ -135,7 +158,16 @@ function boot() {
         rev = nextRev;
         postToParent({ type: "change", payload: { rev } });
       }}
-      onError={(message) => postToParent({ type: "error", payload: { message } })}
+      onError={(message) =>
+        postToParent({ type: "error", payload: { message } })
+      }
+      onSave={() => postToParent({ type: "save" })}
+      onPickItem={(requestId, nodeId, kind) =>
+        postToParent({
+          type: "pickItem",
+          payload: { requestId, nodeId, kind },
+        })
+      }
     />,
   );
   postToParent({ type: "ready" });
